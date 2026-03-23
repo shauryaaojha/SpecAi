@@ -16,24 +16,30 @@ During questioning:
 When ready:
 {"phase":"complete","appType":"final type","appName":"suggested name","summary":"3-5 sentence summary of everything discussed"}`;
 
-const callAPI = async (messages, system, maxTokens = 500) => {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-  "Content-Type": "application/json",
-  "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-  "anthropic-version": "2023-06-01",
-  "anthropic-dangerous-direct-browser-access": "true"
-},
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: maxTokens,
-      system,
-      messages
-    })
-  });
-  const data = await res.json();
-  return data.content.map(b => b.text || "").join("");
+const callAPI = async (messages, system, maxTokens = 2000) => {
+  try {
+    const model = "claude-opus-4-6";
+
+    // Puter.js supports an array of messages with roles (system, user, assistant).
+    // We'll construct the message array properly.
+    const puterMessages = [
+      { role: "system", content: system },
+      ...messages
+    ];
+
+    const response = await window.puter.ai.chat(puterMessages, {
+      model: model,
+      max_tokens: maxTokens
+    });
+
+    // Puter.js returns an object where content is in response.message.content[0].text
+    // or sometimes response.message if it's a simple string.
+    // Based on the docs, response.message.content[0].text is the standard for structured.
+    return response.message.content[0].text;
+  } catch (error) {
+    console.error("Puter API Error:", error);
+    return "Error calling AI. Please check the console.";
+  }
 };
 
 const parseJSON = (text) => {
@@ -41,7 +47,7 @@ const parseJSON = (text) => {
     const clean = text.replace(/```json|```/g, "").trim();
     const match = clean.match(/\{[\s\S]*\}/);
     if (match) return JSON.parse(match[0]);
-  } catch {}
+  } catch { }
   return null;
 };
 
@@ -64,7 +70,7 @@ const Badge = ({ type }) => {
   if (!type) return null;
   const map = { ecommerce: "#f59e0b", saas: "#3b82f6", social: "#ec4899", tool: "#10b981", marketplace: "#8b5cf6", dashboard: "#06b6d4" };
   const c = Object.entries(map).find(([k]) => type.toLowerCase().includes(k))?.[1] || "#6b7280";
-  return <span style={{ background: c+"18", color: c, border: `1px solid ${c}30`, padding: "2px 10px", borderRadius: "100px", fontSize: "11px", fontFamily: "monospace", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>{type}</span>;
+  return <span style={{ background: c + "18", color: c, border: `1px solid ${c}30`, padding: "2px 10px", borderRadius: "100px", fontSize: "11px", fontFamily: "monospace", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>{type}</span>;
 };
 
 const GeneratingStep = ({ label, done, active }) => (
@@ -84,7 +90,7 @@ const OutputSection = ({ specDoc, readyPrompt, phaseChain, appName }) => {
   const getContent = () => {
     if (tab === "spec") return specDoc;
     if (tab === "prompt") return readyPrompt;
-    return Object.entries(phaseChain).map(([, v], i) => `PHASE ${i+1} - ${["ARCHITECTURE","BACKEND","FRONTEND","INTEGRATION"][i]}:\n\n${v}`).join("\n\n---\n\n");
+    return Object.entries(phaseChain).map(([, v], i) => `PHASE ${i + 1} - ${["ARCHITECTURE", "BACKEND", "FRONTEND", "INTEGRATION"][i]}:\n\n${v}`).join("\n\n---\n\n");
   };
 
   const copy = (text, key) => { navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(null), 2000); };
@@ -94,13 +100,13 @@ const OutputSection = ({ specDoc, readyPrompt, phaseChain, appName }) => {
     <div style={{ marginTop: "28px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "14px" }}>
         <div style={{ display: "flex", gap: "2px", background: "#f3f4f6", borderRadius: "10px", padding: "3px" }}>
-          {[["spec","Spec Doc"],["prompt","Ready Prompt"],["chain","Phase Chain"]].map(([k,l]) => (
-            <button key={k} onClick={() => setTab(k)} style={{ padding: "5px 14px", borderRadius: "8px", border: "none", background: tab===k ? "#fff" : "transparent", color: tab===k ? "#111" : "#6b7280", fontSize: "12px", fontWeight: 500, cursor: "pointer", boxShadow: tab===k ? "0 1px 3px rgba(0,0,0,0.08)" : "none", transition: "all 0.15s" }}>{l}</button>
+          {[["spec", "Spec Doc"], ["prompt", "Ready Prompt"], ["chain", "Phase Chain"]].map(([k, l]) => (
+            <button key={k} onClick={() => setTab(k)} style={{ padding: "5px 14px", borderRadius: "8px", border: "none", background: tab === k ? "#fff" : "transparent", color: tab === k ? "#111" : "#6b7280", fontSize: "12px", fontWeight: 500, cursor: "pointer", boxShadow: tab === k ? "0 1px 3px rgba(0,0,0,0.08)" : "none", transition: "all 0.15s" }}>{l}</button>
           ))}
         </div>
         <div style={{ display: "flex", gap: "6px" }}>
-          <button onClick={() => copy(getContent(), tab)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>{copied===tab ? "✓ Copied" : "Copy"}</button>
-          <button onClick={() => download(getContent(), `specai-${tab}-${(appName||"output").toLowerCase().replace(/\s/g,"-")}.md`)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>↓ .md</button>
+          <button onClick={() => copy(getContent(), tab)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>{copied === tab ? "✓ Copied" : "Copy"}</button>
+          <button onClick={() => download(getContent(), `specai-${tab}-${(appName || "output").toLowerCase().replace(/\s/g, "-")}.md`)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>↓ .md</button>
         </div>
       </div>
 
@@ -109,8 +115,8 @@ const OutputSection = ({ specDoc, readyPrompt, phaseChain, appName }) => {
           {Object.entries(phaseChain).map(([key, value], i) => (
             <div key={key} style={{ border: "1px solid #e5e7eb", borderRadius: "12px", overflow: "hidden" }}>
               <div style={{ background: "#f9fafb", padding: "8px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <span style={{ fontSize: "11px", fontWeight: 600, color: "#374151", fontFamily: "monospace" }}>PHASE {i+1} — {["ARCHITECTURE","BACKEND","FRONTEND","INTEGRATION"][i]}</span>
-                <button onClick={() => copy(value, key)} style={{ padding: "2px 8px", borderRadius: "5px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "10px", cursor: "pointer" }}>{copied===key ? "✓" : "Copy"}</button>
+                <span style={{ fontSize: "11px", fontWeight: 600, color: "#374151", fontFamily: "monospace" }}>PHASE {i + 1} — {["ARCHITECTURE", "BACKEND", "FRONTEND", "INTEGRATION"][i]}</span>
+                <button onClick={() => copy(value, key)} style={{ padding: "2px 8px", borderRadius: "5px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "10px", cursor: "pointer" }}>{copied === key ? "✓" : "Copy"}</button>
               </div>
               <pre style={{ margin: 0, padding: "14px", fontSize: "12px", lineHeight: "1.7", color: "#374151", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "DM Mono, monospace", maxHeight: "200px", overflowY: "auto" }}>{value}</pre>
             </div>
@@ -142,7 +148,7 @@ export default function SpecAI() {
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading, generating]);
 
   const generateOutputs = async (summary, appName) => {
-    const steps = ["Generating Spec Doc...","Generating Ready Prompt...","Generating Phase Chain..."];
+    const steps = ["Generating Spec Doc...", "Generating Ready Prompt...", "Generating Phase Chain..."];
     const done = [];
 
     setGenerating({ step: 0, done });
@@ -176,13 +182,13 @@ export default function SpecAI() {
 
     // Parse phase chain
     const phaseChain = { phase1: "", phase2: "", phase3: "", phase4: "" };
-    const headers = ["PHASE 1 - ARCHITECTURE:","PHASE 2 - BACKEND:","PHASE 3 - FRONTEND:","PHASE 4 - INTEGRATION:"];
-    const keys = ["phase1","phase2","phase3","phase4"];
+    const headers = ["PHASE 1 - ARCHITECTURE:", "PHASE 2 - BACKEND:", "PHASE 3 - FRONTEND:", "PHASE 4 - INTEGRATION:"];
+    const keys = ["phase1", "phase2", "phase3", "phase4"];
     headers.forEach((h, i) => {
       const start = chainRaw.indexOf(h);
       if (start === -1) return;
       const contentStart = start + h.length;
-      const nextIdx = headers.slice(i+1).map(nh => chainRaw.indexOf(nh, contentStart)).find(n => n !== -1) ?? chainRaw.length;
+      const nextIdx = headers.slice(i + 1).map(nh => chainRaw.indexOf(nh, contentStart)).find(n => n !== -1) ?? chainRaw.length;
       phaseChain[keys[i]] = chainRaw.slice(contentStart, nextIdx).trim();
     });
 
@@ -279,14 +285,14 @@ export default function SpecAI() {
             <h1 style={{ fontSize: "34px", fontWeight: 600, color: "#111", letterSpacing: "-0.04em", lineHeight: 1.15, margin: "0 0 10px" }}>Idea → Production Prompt.</h1>
             <p style={{ fontSize: "14px", color: "#6b7280", margin: "0 0 28px", lineHeight: 1.65 }}>Describe your app. SpecAI asks the right questions, then generates a spec doc, ready-to-use prompt, and 4-phase build chain.</p>
             <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "14px", padding: "18px", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" }}>
-              <textarea value={idea} onChange={e => setIdea(e.target.value)} onKeyDown={e => { if (e.key==="Enter" && e.metaKey) startSession(); }} placeholder="e.g. An app where restaurant owners manage menus, orders and staff shifts from one dashboard..." rows={4} style={{ width: "100%", border: "none", resize: "none", fontSize: "14px", lineHeight: "1.7", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif" }} />
+              <textarea value={idea} onChange={e => setIdea(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && e.metaKey) startSession(); }} placeholder="e.g. An app where restaurant owners manage menus, orders and staff shifts from one dashboard..." rows={4} style={{ width: "100%", border: "none", resize: "none", fontSize: "14px", lineHeight: "1.7", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif" }} />
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "10px", paddingTop: "10px", borderTop: "1px solid #f3f4f6" }}>
                 <span style={{ fontSize: "11px", color: "#d1d5db", fontFamily: "DM Mono, monospace" }}>⌘+Enter to start</span>
                 <button onClick={startSession} disabled={!idea.trim()} className="sbtn" style={{ padding: "7px 18px", borderRadius: "9px", border: "none", background: "#111", color: "#fff", fontSize: "13px", fontWeight: 500, cursor: "pointer", transition: "background 0.15s" }}>Start →</button>
               </div>
             </div>
             <div style={{ display: "flex", gap: "6px", marginTop: "12px", flexWrap: "wrap" }}>
-              {["Ecommerce with AI recommendations","SaaS analytics dashboard","Doctor-patient app","Social app for book clubs"].map(ex => (
+              {["Ecommerce with AI recommendations", "SaaS analytics dashboard", "Doctor-patient app", "Social app for book clubs"].map(ex => (
                 <button key={ex} className="chip" onClick={() => setIdea(ex)} style={{ padding: "5px 12px", borderRadius: "100px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "12px", cursor: "pointer", transition: "background 0.15s" }}>{ex}</button>
               ))}
             </div>
@@ -297,7 +303,7 @@ export default function SpecAI() {
           <div>
             <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               {messages.map((msg, i) => (
-                <div key={i} className="msg" style={{ display: "flex", justifyContent: msg.type==="user" ? "flex-end" : "flex-start" }}>
+                <div key={i} className="msg" style={{ display: "flex", justifyContent: msg.type === "user" ? "flex-end" : "flex-start" }}>
                   {msg.type === "ai" && (
                     <div style={{ maxWidth: "84%" }}>
                       {msg.insight && <div style={{ fontSize: "10px", color: "#9ca3af", fontFamily: "DM Mono, monospace", marginBottom: "5px", paddingLeft: "2px" }}>⬡ {msg.insight}</div>}
@@ -316,7 +322,7 @@ export default function SpecAI() {
                 <div className="msg" style={{ display: "flex" }}>
                   <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "14px", padding: "16px 20px", boxShadow: "0 1px 3px rgba(0,0,0,0.04)", minWidth: "270px" }}>
                     <div style={{ fontSize: "10px", color: "#9ca3af", fontFamily: "DM Mono, monospace", marginBottom: "10px" }}>⬡ Building your spec</div>
-                    {["Generating Spec Doc...","Generating Ready Prompt...","Generating Phase Chain..."].map((label, i) => (
+                    {["Generating Spec Doc...", "Generating Ready Prompt...", "Generating Phase Chain..."].map((label, i) => (
                       <GeneratingStep key={label} label={label} done={generating.done.includes(label)} active={generating.step === i} />
                     ))}
                   </div>
@@ -326,7 +332,7 @@ export default function SpecAI() {
               {loading && !generating && (
                 <div className="msg" style={{ display: "flex" }}>
                   <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "14px", padding: "12px 16px", display: "flex", gap: "4px", alignItems: "center" }}>
-                    {[0,1,2].map(i => <div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#d1d5db", animation: `blink 1.2s ${i*0.2}s infinite` }} />)}
+                    {[0, 1, 2].map(i => <div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#d1d5db", animation: `blink 1.2s ${i * 0.2}s infinite` }} />)}
                   </div>
                 </div>
               )}
@@ -337,7 +343,7 @@ export default function SpecAI() {
 
             {!output && !generating && (
               <div style={{ position: "sticky", bottom: "14px", marginTop: "20px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: "13px", padding: "10px 14px", display: "flex", gap: "8px", alignItems: "flex-end", boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
-                <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); sendAnswer(); }}} placeholder="Your answer..." rows={1} style={{ flex: 1, border: "none", resize: "none", fontSize: "14px", lineHeight: "1.6", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif", maxHeight: "100px", overflowY: "auto" }} />
+                <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAnswer(); } }} placeholder="Your answer..." rows={1} style={{ flex: 1, border: "none", resize: "none", fontSize: "14px", lineHeight: "1.6", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif", maxHeight: "100px", overflowY: "auto" }} />
                 <button onClick={sendAnswer} disabled={!input.trim() || loading} className="sbtn" style={{ padding: "7px 14px", borderRadius: "9px", border: "none", background: "#111", color: "#fff", fontSize: "13px", fontWeight: 500, cursor: "pointer", transition: "background 0.15s", flexShrink: 0 }}>→</button>
               </div>
             )}
