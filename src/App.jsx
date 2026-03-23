@@ -1,132 +1,111 @@
 import { useState, useRef, useEffect } from "react";
 
-const DISCOVERY_SYSTEM = `You are SpecAI, an expert product architect. Help users define their app idea through smart questions.
+// ── The core insight: don't ask Opus to return JSON during discovery.
+// Just let it ask questions naturally. We store all Q&A in a context DB.
+// When ready, we build the summary ourselves and pass it to generation.
 
-- Auto-detect app type (ecommerce, SaaS, social, tool, marketplace, dashboard, etc.)
-- Ask ONE smart contextual follow-up question at a time
-- Cover: core features, users, stack, design, auth, DB, integrations, edge cases
-- When you have enough info to build a complete spec, set phase to "complete"
+const DISCOVERY_SYSTEM = `You are SpecAI, an expert product architect having a natural conversation to understand someone's app idea.
 
-You may think through your reasoning briefly, but your FINAL output must ALWAYS be valid JSON and nothing else after it.
+Ask ONE smart, focused question at a time. Be conversational, not robotic.
+Cover these areas across your questions (not all at once):
+- Core problem and target users
+- Key features and flows  
+- Tech stack preferences
+- Auth, DB, design preferences
+- Monetization, deployment, integrations
 
-During questioning, end with:
-{"phase":"questioning","appType":"detected type or null","question":"your single smart question","insight":"one line of what you understand so far"}
+When you feel you have enough to build a complete spec, say exactly:
+"SPECAI_READY: [app name]"
+as your entire response (nothing else before or after).
 
-When you have enough info (features, users, stack, auth, DB, design all covered), end with:
-{"phase":"complete","appType":"final type","appName":"a good app name","summary":"detailed 5-8 sentence summary covering app purpose, all features discussed, tech stack, target users, and any special requirements"}
+Otherwise just ask your next question naturally. No JSON. No formatting. Just conversational text.`;
 
-CRITICAL: Your response must end with a single JSON object. No text after the closing brace.`;
+const SPEC_SYSTEM = `You are an expert product architect. Write extremely detailed, production-ready product spec documents in markdown. Be exhaustive. Plain markdown only. No preamble.`;
+const PROMPT_SYSTEM = `You are an expert prompt engineer. Write production-ready, spoonfeeding prompts for AI coding assistants. Zero ambiguity. Plain text only. No preamble.`;
+const CHAIN_SYSTEM = `You are an expert prompt engineer. Write 4 detailed, self-contained phase-wise build prompts. Each must be spoonfeeding. Plain text only. No preamble.`;
 
-const SPEC_SYSTEM = `You are an expert product architect. Write extremely detailed, production-ready product spec documents in markdown. Be exhaustive — every feature, every edge case, every DB field, every API endpoint. Plain markdown only. No preamble.`;
-const PROMPT_SYSTEM = `You are an expert prompt engineer who writes production-ready prompts for AI coding assistants. Your prompts are extremely detailed and spoonfeeding — zero ambiguity. Plain text only. No preamble.`;
-const CHAIN_SYSTEM = `You are an expert prompt engineer. Write 4 detailed, self-contained phase-wise build prompts. Each must be spoonfeeding — exact file names, folder structure, code patterns, edge cases. Plain text only. No preamble.`;
-
-const extractText = (response) => {
-  try {
-    if (typeof response === "string") return response;
-    if (response?.message?.content?.[0]?.text) return response.message.content[0].text;
-    if (response?.message?.content && typeof response.message.content === "string") return response.message.content;
-    if (response?.message && typeof response.message === "string") return response.message;
-    if (response?.text) return response.text;
-    if (response?.content?.[0]?.text) return response.content[0].text;
-    if (Array.isArray(response?.content)) return response.content.map(c => c.text || "").join("");
-    return "";
-  } catch { return ""; }
-};
-
+// ── Puter API call — handles all response shapes
 const callAPI = async (messages, system, maxTokens = 4000) => {
   try {
     const response = await window.puter.ai.chat(
       [{ role: "system", content: system }, ...messages],
-      { model: "claude-3-5-sonnet", max_tokens: maxTokens }
+      { model: "claude-sonnet-4-6", max_tokens: maxTokens }
     );
-    const text = extractText(response);
-    if (!text) console.warn("Empty response from Puter:", JSON.stringify(response));
-    return text || "Error: empty response.";
+    // Handle every possible Puter response shape
+    if (typeof response === "string") return response;
+    if (response?.message?.content?.[0]?.text) return response.message.content[0].text;
+    if (typeof response?.message?.content === "string") return response.message.content;
+    if (typeof response?.message === "string") return response.message;
+    if (response?.text) return response.text;
+    if (response?.content?.[0]?.text) return response.content[0].text;
+    if (Array.isArray(response?.content)) return response.content.map(c => c.text || "").join("");
+    // Fallback: stringify and dig
+    const str = JSON.stringify(response);
+    const m = str.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (m) return m[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    console.warn("Unknown Puter response shape:", str.slice(0, 300));
+    return "";
   } catch (err) {
     console.error("Puter API Error:", err);
-    return `Error: ${err?.message || "API call failed"}`;
+    return "";
   }
 };
 
-const parseJSON = (text) => {
-  if (!text || text.startsWith("Error:")) return null;
-  try {
-    const clean = text.replace(/```json[\s\S]*?```/g, m => m.slice(7,-3)).replace(/```/g,"").trim();
-    try { return JSON.parse(clean); } catch {}
-    const match = clean.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-  } catch {}
-  return null;
+// ── Build summary from context DB (Q&A pairs we stored ourselves)
+const buildSummaryFromContext = (idea, contextDB) => {
+  const lines = [`App Idea: ${idea}`, ""];
+  contextDB.forEach(({ q, a }, i) => {
+    lines.push(`Q${i + 1}: ${q}`);
+    lines.push(`A${i + 1}: ${a}`);
+    lines.push("");
+  });
+  return lines.join("\n");
 };
 
-const buildSpecPrompt = (summary, feedback = null) => `${feedback ? `PREVIOUS FEEDBACK: "${feedback}"\nUpdate the spec accordingly. Keep everything else intact.\n\n` : ""}Write a COMPLETE, EXHAUSTIVE product spec document in markdown for this app.
-
-Include ALL sections with full detail:
+const buildSpecPrompt = (summary, feedback = null) => `${feedback ? `PREVIOUS FEEDBACK: "${feedback}"\nUpdate the spec accordingly.\n\n` : ""}Write a COMPLETE, EXHAUSTIVE product spec document in markdown.
 
 ## 1. App Overview
-- App name, tagline, purpose
-- Problem it solves
+- Name, tagline, purpose, problem solved
 - Target audience (primary + secondary)
-- Key value proposition
+- Value proposition
 
 ## 2. User Roles & Permissions
-- Every user role
-- Exact permissions per role (what they can/cannot do)
+- Every role with exact permissions
 
 ## 3. Core Features
-For EACH feature:
-- Feature name + detailed description
-- User flow (step by step)
-- Edge cases to handle
-- UI components involved
+For EACH feature: description, user flow (step by step), edge cases, UI components
 
 ## 4. Database Schema
-For EACH table/collection:
-- All fields with data types
-- Required vs optional
-- Relationships/foreign keys
-- Indexes to add
+For EACH table: all fields + types, required/optional, relationships, indexes
 
 ## 5. API Endpoints
-For EACH endpoint:
-- Method + route
-- Request body (all fields + types)
-- Response body (success + error)
-- Auth required (yes/no + role)
-- Business logic notes
+For EACH endpoint: method + route, request body, response (success + error), auth required, business logic
 
 ## 6. Authentication & Authorization
-- Auth strategy
-- Token storage + refresh flow
-- Protected routes list
+- Strategy, token storage, refresh flow, protected routes
 
 ## 7. UI/UX Flows
-- Every screen/page
-- Navigation flow between screens
-- Loading/error/empty states for each screen
+- Every screen, navigation flow, loading/error/empty states
 
 ## 8. Tech Stack
-- Frontend, Backend, Database, Auth, Storage, Deployment, 3rd party APIs
+- Frontend, Backend, DB, Auth, Storage, Deployment, 3rd party APIs
 
 ## 9. Folder Structure
-- Full folder tree with file names and purpose
+- Full tree with every file and its purpose
 
 ## 10. Edge Cases & Error Handling
-- Every edge case per feature and how to handle it
+- Every edge case per feature and resolution
 
-App Summary:
+Context:
 ${summary}`;
 
-const buildPromptPrompt = (summary, feedback = null) => `${feedback ? `PREVIOUS FEEDBACK: "${feedback}"\nUpdate the prompt accordingly.\n\n` : ""}Write a single COMPLETE, SPOONFEEDING production-ready prompt a developer can paste directly into Claude to build this entire app.
-
-Structure it EXACTLY like this:
+const buildPromptPrompt = (summary, feedback = null) => `${feedback ? `PREVIOUS FEEDBACK: "${feedback}"\nUpdate accordingly.\n\n` : ""}Write a single COMPLETE, SPOONFEEDING production-ready prompt a developer pastes into Claude to build this entire app.
 
 ## Role
-[Who the AI should act as — specific seniority and expertise]
+[Specific senior engineer persona]
 
 ## App Overview
-[2-3 sentences — what it does and who it's for]
+[2-3 sentences]
 
 ## Tech Stack
 \`\`\`json
@@ -134,61 +113,57 @@ Structure it EXACTLY like this:
 \`\`\`
 
 ## Folder Structure
-[Complete folder tree — every file listed with its purpose]
+[Complete tree — every file with purpose]
 
 ## Pages & Routes
-[Every page, its route, and exactly what it renders]
+[Every page, route, exact content]
 
 ## Database Schema
 \`\`\`json
-[Every collection/table with all fields, types, and relationships]
+[Every collection with all fields, types, relationships]
 \`\`\`
 
 ## API Endpoints
-[Every endpoint: method, route, full request body, full response, auth requirement, business logic]
+[Every endpoint: method, route, full request/response, auth, business logic]
 
 ## Feature Specifications
-[Every feature with: exact behavior, all edge cases, validation rules, error states]
+[Every feature: exact behavior, all edge cases, validation, error states]
 
 ## UI Requirements
-[Every component, design system, responsive rules, loading/error/empty states]
+[Every component, responsive rules, loading/error/empty states]
 
 ## Auth Flow
-[Step by step auth implementation — registration, login, token refresh, logout]
+[Step by step: register, login, refresh, logout]
 
 ## Environment Variables
-[Every .env variable with description and example value]
+[Every var with description and example]
 
 ## Output Rules
-- Full files only — no placeholders, no TODOs, no "add your logic here"
+- Full files only — no placeholders, no TODOs
 - Folder structure first, then each file completely
-- Include .env.example
-- Include README with setup and run steps
+- Include .env.example and README
 
-App Summary:
+Context:
 ${summary}`;
 
-const buildChainPrompt = (summary, feedback = null) => `${feedback ? `PREVIOUS FEEDBACK: "${feedback}"\nUpdate the phase chain accordingly.\n\n` : ""}Write 4 DETAILED, SPOONFEEDING phase-wise build prompts for this app.
-
-Each phase must be completely self-contained. List exact files to create. Include exact code patterns. Specify what to verify before moving to next phase.
-
-Format EXACTLY as:
+const buildChainPrompt = (summary, feedback = null) => `${feedback ? `PREVIOUS FEEDBACK: "${feedback}"\nUpdate accordingly.\n\n` : ""}Write 4 DETAILED, SPOONFEEDING phase-wise build prompts. Each fully self-contained.
 
 PHASE 1 - ARCHITECTURE:
-[Cover: project init, full folder structure, all config files (.env, tsconfig, etc.), base routing setup, DB connection, auth skeleton. List every file to create with its exact purpose and initial content outline.]
+[Project init, full folder structure, all config files, env setup, base routing, DB connection, auth skeleton. List every file to create with exact purpose.]
 
 PHASE 2 - BACKEND:
-[Cover: every API endpoint with full implementation, all DB models/schema with validations, middleware (auth, error handling, logging), input validation, business logic for each feature. Include exact request/response shapes.]
+[Every API endpoint implementation, all DB models with validations, middleware, input validation, business logic. Exact request/response shapes for each endpoint.]
 
 PHASE 3 - FRONTEND:
-[Cover: every page and component, state management setup, API service layer, all forms with validation, loading/error/empty states, responsive design rules. List every component with its props and behavior.]
+[Every page and component, state management, API service layer, all forms with validation, loading/error/empty states, responsive rules. Every component with props.]
 
 PHASE 4 - INTEGRATION:
-[Cover: connecting all frontend to backend, end-to-end auth flow, file uploads if any, 3rd party service integrations, error boundaries, environment config for deployment, final testing checklist.]
+[Connect frontend to backend, end-to-end auth, file uploads, 3rd party services, error boundaries, deployment config, final testing checklist.]
 
-App Summary:
+Context:
 ${summary}`;
 
+// ── Components
 const TypewriterText = ({ text, speed = 14 }) => {
   const [displayed, setDisplayed] = useState("");
   const [done, setDone] = useState(false);
@@ -208,7 +183,7 @@ const Badge = ({ type }) => {
   if (!type) return null;
   const map = { ecommerce: "#f59e0b", saas: "#3b82f6", social: "#ec4899", tool: "#10b981", marketplace: "#8b5cf6", dashboard: "#06b6d4" };
   const c = Object.entries(map).find(([k]) => type.toLowerCase().includes(k))?.[1] || "#6b7280";
-  return <span style={{ background: c+"18", color: c, border: `1px solid ${c}30`, padding: "2px 10px", borderRadius: "100px", fontSize: "11px", fontFamily: "monospace", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>{type}</span>;
+  return <span style={{ background: c + "18", color: c, border: `1px solid ${c}30`, padding: "2px 10px", borderRadius: "100px", fontSize: "11px", fontFamily: "monospace", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>{type}</span>;
 };
 
 const GeneratingStep = ({ label, done, active }) => (
@@ -226,14 +201,13 @@ const OutputSection = ({ specDoc, readyPrompt, phaseChain, appName, onFeedback, 
   const [copied, setCopied] = useState(null);
   const [feedback, setFeedback] = useState("");
   const [showFeedback, setShowFeedback] = useState(false);
-
   const tabLabels = { spec: "Spec Doc", prompt: "Ready Prompt", chain: "Phase Chain" };
 
   const getContent = () => {
     if (tab === "spec") return specDoc;
     if (tab === "prompt") return readyPrompt;
     return Object.entries(phaseChain).map(([, v], i) =>
-      `PHASE ${i+1} - ${["ARCHITECTURE","BACKEND","FRONTEND","INTEGRATION"][i]}:\n\n${v}`
+      `PHASE ${i + 1} - ${["ARCHITECTURE", "BACKEND", "FRONTEND", "INTEGRATION"][i]}:\n\n${v}`
     ).join("\n\n---\n\n");
   };
 
@@ -243,45 +217,33 @@ const OutputSection = ({ specDoc, readyPrompt, phaseChain, appName, onFeedback, 
   const submitFeedback = () => {
     if (!feedback.trim() || regenerating) return;
     onFeedback(feedback.trim(), tab);
-    setFeedback("");
-    setShowFeedback(false);
+    setFeedback(""); setShowFeedback(false);
   };
 
   return (
     <div style={{ marginTop: "28px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "14px", flexWrap: "wrap", gap: "8px" }}>
         <div style={{ display: "flex", gap: "2px", background: "#f3f4f6", borderRadius: "10px", padding: "3px" }}>
-          {[["spec","Spec Doc"],["prompt","Ready Prompt"],["chain","Phase Chain"]].map(([k,l]) => (
-            <button key={k} onClick={() => { setTab(k); setShowFeedback(false); }} style={{ padding: "5px 14px", borderRadius: "8px", border: "none", background: tab===k ? "#fff" : "transparent", color: tab===k ? "#111" : "#6b7280", fontSize: "12px", fontWeight: 500, cursor: "pointer", boxShadow: tab===k ? "0 1px 3px rgba(0,0,0,0.08)" : "none", transition: "all 0.15s" }}>{l}</button>
+          {[["spec", "Spec Doc"], ["prompt", "Ready Prompt"], ["chain", "Phase Chain"]].map(([k, l]) => (
+            <button key={k} onClick={() => { setTab(k); setShowFeedback(false); }} style={{ padding: "5px 14px", borderRadius: "8px", border: "none", background: tab === k ? "#fff" : "transparent", color: tab === k ? "#111" : "#6b7280", fontSize: "12px", fontWeight: 500, cursor: "pointer", boxShadow: tab === k ? "0 1px 3px rgba(0,0,0,0.08)" : "none", transition: "all 0.15s" }}>{l}</button>
           ))}
         </div>
         <div style={{ display: "flex", gap: "6px" }}>
-          <button onClick={() => copy(getContent(), tab)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>{copied===tab ? "✓ Copied" : "Copy"}</button>
-          <button onClick={() => download(getContent(), `specai-${tab}-${(appName||"output").toLowerCase().replace(/\s/g,"-")}.md`)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>↓ .md</button>
+          <button onClick={() => copy(getContent(), tab)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>{copied === tab ? "✓ Copied" : "Copy"}</button>
+          <button onClick={() => download(getContent(), `specai-${tab}-${(appName || "output").toLowerCase().replace(/\s/g, "-")}.md`)} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: "11px", cursor: "pointer" }}>↓ .md</button>
           <button onClick={() => setShowFeedback(v => !v)} style={{ padding: "5px 12px", borderRadius: "7px", border: `1px solid ${showFeedback ? "#111" : "#e5e7eb"}`, background: showFeedback ? "#111" : "#fff", color: showFeedback ? "#fff" : "#111", fontSize: "11px", cursor: "pointer", fontWeight: 500, transition: "all 0.15s" }}>✎ Refine</button>
         </div>
       </div>
 
       {showFeedback && (
         <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "12px", padding: "14px", marginBottom: "14px", boxShadow: "0 1px 4px rgba(0,0,0,0.05)" }}>
-          <div style={{ fontSize: "11px", color: "#9ca3af", fontFamily: "monospace", marginBottom: "8px" }}>
-            ✎ Refining: <span style={{ color: "#111", fontWeight: 600 }}>{tabLabels[tab]}</span>
-          </div>
-          <textarea
-            value={feedback}
-            onChange={e => setFeedback(e.target.value)}
-            onKeyDown={e => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); submitFeedback(); }}}
-            placeholder={`What should change? e.g. "Add WebSocket support", "Include Stripe payment flow", "Add admin dashboard"...`}
-            rows={2}
-            style={{ width: "100%", border: "none", fontSize: "13px", lineHeight: "1.6", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif", resize: "none", outline: "none" }}
-          />
+          <div style={{ fontSize: "11px", color: "#9ca3af", fontFamily: "monospace", marginBottom: "8px" }}>✎ Refining: <span style={{ color: "#111", fontWeight: 600 }}>{tabLabels[tab]}</span></div>
+          <textarea value={feedback} onChange={e => setFeedback(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitFeedback(); } }} placeholder={`What should change? e.g. "Add WebSocket support", "Include Stripe payment flow"...`} rows={2} style={{ width: "100%", border: "none", fontSize: "13px", lineHeight: "1.6", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif", resize: "none", outline: "none" }} />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "8px", paddingTop: "8px", borderTop: "1px solid #f3f4f6" }}>
             <span style={{ fontSize: "10px", color: "#d1d5db", fontFamily: "monospace" }}>Enter to send</span>
             <div style={{ display: "flex", gap: "6px" }}>
               <button onClick={() => { setShowFeedback(false); setFeedback(""); }} style={{ padding: "5px 12px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "11px", cursor: "pointer" }}>Cancel</button>
-              <button onClick={submitFeedback} disabled={!feedback.trim() || regenerating} style={{ padding: "5px 14px", borderRadius: "7px", border: "none", background: "#111", color: "#fff", fontSize: "11px", cursor: "pointer", opacity: !feedback.trim() || regenerating ? 0.4 : 1, transition: "opacity 0.15s" }}>
-                {regenerating ? "Regenerating..." : "Regenerate →"}
-              </button>
+              <button onClick={submitFeedback} disabled={!feedback.trim() || regenerating} style={{ padding: "5px 14px", borderRadius: "7px", border: "none", background: "#111", color: "#fff", fontSize: "11px", cursor: "pointer", opacity: !feedback.trim() || regenerating ? 0.4 : 1 }}>{regenerating ? "Regenerating..." : "Regenerate →"}</button>
             </div>
           </div>
         </div>
@@ -299,8 +261,8 @@ const OutputSection = ({ specDoc, readyPrompt, phaseChain, appName, onFeedback, 
           {Object.entries(phaseChain).map(([key, value], i) => (
             <div key={key} style={{ border: "1px solid #e5e7eb", borderRadius: "12px", overflow: "hidden" }}>
               <div style={{ background: "#f9fafb", padding: "8px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <span style={{ fontSize: "11px", fontWeight: 600, color: "#374151", fontFamily: "monospace" }}>PHASE {i+1} — {["ARCHITECTURE","BACKEND","FRONTEND","INTEGRATION"][i]}</span>
-                <button onClick={() => copy(value, key)} style={{ padding: "2px 8px", borderRadius: "5px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "10px", cursor: "pointer" }}>{copied===key ? "✓" : "Copy"}</button>
+                <span style={{ fontSize: "11px", fontWeight: 600, color: "#374151", fontFamily: "monospace" }}>PHASE {i + 1} — {["ARCHITECTURE", "BACKEND", "FRONTEND", "INTEGRATION"][i]}</span>
+                <button onClick={() => copy(value, key)} style={{ padding: "2px 8px", borderRadius: "5px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "10px", cursor: "pointer" }}>{copied === key ? "✓" : "Copy"}</button>
               </div>
               <pre style={{ margin: 0, padding: "14px", fontSize: "12px", lineHeight: "1.7", color: "#374151", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "DM Mono, monospace", maxHeight: "220px", overflowY: "auto" }}>{value}</pre>
             </div>
@@ -315,61 +277,72 @@ const OutputSection = ({ specDoc, readyPrompt, phaseChain, appName, onFeedback, 
   );
 };
 
+// ── Main App
 export default function SpecAI() {
   const [idea, setIdea] = useState("");
   const [started, setStarted] = useState(false);
   const [messages, setMessages] = useState([]);
-  const [history, setHistory] = useState([]);
+  const [apiHistory, setApiHistory] = useState([]); // raw messages for API
+  const [contextDB, setContextDB] = useState([]);   // {q, a} pairs — our source of truth
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [appType, setAppType] = useState(null);
+  const [appName, setAppName] = useState("Your App");
   const [output, setOutput] = useState(null);
   const [summary, setSummary] = useState("");
   const [questionCount, setQuestionCount] = useState(0);
   const [generating, setGenerating] = useState(null);
   const [regenerating, setRegenerating] = useState(false);
+  const [lastQuestion, setLastQuestion] = useState("");
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading, generating]);
 
+  const detectAppType = (text) => {
+    const t = text.toLowerCase();
+    if (t.includes("ecommerce") || t.includes("shop") || t.includes("store") || t.includes("product")) return "ecommerce";
+    if (t.includes("social") || t.includes("community") || t.includes("feed") || t.includes("friend")) return "social";
+    if (t.includes("dashboard") || t.includes("analytics") || t.includes("metric")) return "dashboard";
+    if (t.includes("marketplace")) return "marketplace";
+    if (t.includes("saas") || t.includes("subscription") || t.includes("team")) return "saas";
+    return "tool";
+  };
+
   const parsePhaseChain = (chainRaw) => {
     const phaseChain = { phase1: "", phase2: "", phase3: "", phase4: "" };
-    const headers = ["PHASE 1 - ARCHITECTURE:","PHASE 2 - BACKEND:","PHASE 3 - FRONTEND:","PHASE 4 - INTEGRATION:"];
-    const keys = ["phase1","phase2","phase3","phase4"];
+    const headers = ["PHASE 1 - ARCHITECTURE:", "PHASE 2 - BACKEND:", "PHASE 3 - FRONTEND:", "PHASE 4 - INTEGRATION:"];
+    const keys = ["phase1", "phase2", "phase3", "phase4"];
     headers.forEach((h, i) => {
       const start = chainRaw.indexOf(h);
       if (start === -1) return;
       const contentStart = start + h.length;
-      const nextIdx = headers.slice(i+1).map(nh => chainRaw.indexOf(nh, contentStart)).find(n => n !== -1) ?? chainRaw.length;
+      const nextIdx = headers.slice(i + 1).map(nh => chainRaw.indexOf(nh, contentStart)).find(n => n !== -1) ?? chainRaw.length;
       phaseChain[keys[i]] = chainRaw.slice(contentStart, nextIdx).trim();
     });
     return phaseChain;
   };
 
-  const generateOutputs = async (sum, appName) => {
-    const steps = ["Generating Spec Doc...","Generating Ready Prompt...","Generating Phase Chain..."];
+  const generateOutputs = async (sum, name) => {
+    const steps = ["Generating Spec Doc...", "Generating Ready Prompt...", "Generating Phase Chain..."];
     const done = [];
     setGenerating({ step: 0, done });
 
     const specDoc = await callAPI([{ role: "user", content: buildSpecPrompt(sum) }], SPEC_SYSTEM, 4000);
-    done.push(steps[0]);
-    setGenerating({ step: 1, done: [...done] });
+    done.push(steps[0]); setGenerating({ step: 1, done: [...done] });
 
     const readyPrompt = await callAPI([{ role: "user", content: buildPromptPrompt(sum) }], PROMPT_SYSTEM, 4000);
-    done.push(steps[1]);
-    setGenerating({ step: 2, done: [...done] });
+    done.push(steps[1]); setGenerating({ step: 2, done: [...done] });
 
     const chainRaw = await callAPI([{ role: "user", content: buildChainPrompt(sum) }], CHAIN_SYSTEM, 4000);
-    done.push(steps[2]);
-    setGenerating({ step: 3, done: [...done] });
+    done.push(steps[2]); setGenerating({ step: 3, done: [...done] });
 
     setTimeout(() => {
       setGenerating(null);
-      setOutput({ specDoc: specDoc.trim(), readyPrompt: readyPrompt.trim(), phaseChain: parsePhaseChain(chainRaw), appName });
+      setOutput({ specDoc: specDoc.trim(), readyPrompt: readyPrompt.trim(), phaseChain: parsePhaseChain(chainRaw), appName: name });
       setMessages(prev => [...prev, {
         type: "ai",
-        text: `Done! Your complete spec for "${appName}" is ready 👇\n\nNot satisfied with any section? Hit the ✎ Refine button on any tab to give feedback and regenerate just that part.`,
+        text: `Done! Your complete spec for "${name}" is ready 👇\n\nNot happy with something? Hit ✎ Refine on any tab to update it.`,
         insight: "Generation complete"
       }]);
     }, 300);
@@ -377,58 +350,47 @@ export default function SpecAI() {
 
   const handleFeedback = async (feedbackText, targetTab) => {
     setRegenerating(true);
-    setMessages(prev => [...prev,
-      { type: "user", text: `Refine ${targetTab === "spec" ? "Spec Doc" : targetTab === "prompt" ? "Ready Prompt" : "Phase Chain"}: ${feedbackText}` }
-    ]);
-
+    setMessages(prev => [...prev, { type: "user", text: `Refine ${targetTab === "spec" ? "Spec Doc" : targetTab === "prompt" ? "Ready Prompt" : "Phase Chain"}: ${feedbackText}` }]);
     let updated = { ...output };
-
     if (targetTab === "spec") {
       const specDoc = await callAPI([{ role: "user", content: buildSpecPrompt(summary, feedbackText) }], SPEC_SYSTEM, 4000);
       updated.specDoc = specDoc.trim();
     } else if (targetTab === "prompt") {
       const readyPrompt = await callAPI([{ role: "user", content: buildPromptPrompt(summary, feedbackText) }], PROMPT_SYSTEM, 4000);
       updated.readyPrompt = readyPrompt.trim();
-    } else if (targetTab === "chain") {
+    } else {
       const chainRaw = await callAPI([{ role: "user", content: buildChainPrompt(summary, feedbackText) }], CHAIN_SYSTEM, 4000);
       updated.phaseChain = parsePhaseChain(chainRaw);
     }
-
     setOutput(updated);
     setRegenerating(false);
-    setMessages(prev => [...prev, {
-      type: "ai",
-      text: `Updated! Check the ${targetTab === "spec" ? "Spec Doc" : targetTab === "prompt" ? "Ready Prompt" : "Phase Chain"} tab 🔄`,
-      insight: "Regenerated from feedback"
-    }]);
-  };
-
-  const callDiscovery = async (hist) => {
-    const text = await callAPI(hist, DISCOVERY_SYSTEM, 800);
-    const parsed = parseJSON(text);
-    if (parsed) return parsed;
-    // If JSON parse fails but we got real text back, use it as the question
-    if (text && !text.startsWith("Error:") && text.length > 10) {
-      const cleanText = text.replace(/```json|```/g,"").trim().slice(0, 300);
-      return { phase: "questioning", question: cleanText, insight: "Thinking..." };
-    }
-    // True fallback — but make it context-aware using last user message
-    const lastUserMsg = hist.filter(m => m.role === "user").slice(-1)[0]?.content || "";
-    return {
-      phase: "questioning",
-      question: `Thanks for that. What tech stack are you thinking — or should I suggest one based on your idea?`,
-      insight: "Continuing discovery..."
-    };
+    setMessages(prev => [...prev, { type: "ai", text: `Updated! Check the ${targetTab === "spec" ? "Spec Doc" : targetTab === "prompt" ? "Ready Prompt" : "Phase Chain"} tab 🔄`, insight: "Regenerated" }]);
   };
 
   const startSession = async () => {
     if (!idea.trim()) return;
     setStarted(true); setLoading(true);
+    if (!appType) setAppType(detectAppType(idea));
+
     const hist = [{ role: "user", content: `My app idea: ${idea}` }];
-    const result = await callDiscovery(hist);
-    if (result.appType) setAppType(result.appType);
-    setHistory([...hist, { role: "assistant", content: JSON.stringify(result) }]);
-    setMessages([{ type: "user", text: idea }, { type: "ai", text: result.question || "Tell me more!", insight: result.insight }]);
+    const aiText = await callAPI(hist, DISCOVERY_SYSTEM, 800);
+
+    // Check if immediately ready (unlikely but handle it)
+    if (aiText.includes("SPECAI_READY:")) {
+      const name = aiText.split("SPECAI_READY:")[1]?.trim() || "Your App";
+      setAppName(name);
+      const sum = buildSummaryFromContext(idea, []);
+      setSummary(sum);
+      setLoading(false);
+      setMessages([{ type: "user", text: idea }, { type: "ai", text: `Got it! Generating spec for "${name}"...`, insight: "Ready" }]);
+      await generateOutputs(sum, name);
+      return;
+    }
+
+    const newHist = [...hist, { role: "assistant", content: aiText }];
+    setApiHistory(newHist);
+    setLastQuestion(aiText);
+    setMessages([{ type: "user", text: idea }, { type: "ai", text: aiText, insight: "Understanding your idea..." }]);
     setQuestionCount(1); setLoading(false);
     setTimeout(() => inputRef.current?.focus(), 100);
   };
@@ -437,33 +399,70 @@ export default function SpecAI() {
     if (!input.trim() || loading) return;
     const userText = input.trim();
     setInput("");
-    const newHist = [...history, { role: "user", content: userText }];
+
+    // Check if user wants to force generate
+    const forceWords = /^(that'?s?\s*(all|it|enough)|done|generate|finish|go|proceed|build it|yes|ok(ay)?|start building)$/i;
+    const isForce = forceWords.test(userText.trim());
+
+    // Store Q&A in context DB
+    const newContextDB = [...contextDB, { q: lastQuestion, a: userText }];
+    setContextDB(newContextDB);
     setMessages(prev => [...prev, { type: "user", text: userText }]);
-    setHistory(newHist);
-    setLoading(true);
 
-    const result = await callDiscovery(newHist);
-    if (result.appType) setAppType(result.appType);
-    setHistory([...newHist, { role: "assistant", content: JSON.stringify(result) }]);
-
-    // Force complete if user says "that's all", "done", "generate", etc.
-    const forceComplete = /^(that'?s?\s*(all|it|enough)|done|generate|finish|complete|go|yes|ok(ay)?|proceed|build it)$/i.test(userText.trim());
-
-    if (result.phase === "complete" || (forceComplete && questionCount >= 3)) {
-      const finalSummary = result.summary || `${idea}. User confirmed all features are specified after ${questionCount} questions. Last context: ${hist.slice(-4).map(m=>m.content).join(" | ")}`;
-      const finalName = result.appName || "Your App";
+    if (isForce && questionCount >= 2) {
+      // Build summary from everything we collected and generate
+      const sum = buildSummaryFromContext(idea, newContextDB);
+      setSummary(sum);
       setLoading(false);
-      setSummary(finalSummary);
-      setMessages(prev => [...prev, { type: "ai", text: `Got everything! Generating your full spec for "${finalName}"...`, insight: "Spec complete — building outputs" }]);
-      await generateOutputs(finalSummary, finalName);
-    } else {
-      setMessages(prev => [...prev, { type: "ai", text: result.question, insight: result.insight }]);
-      setQuestionCount(q => q + 1); setLoading(false);
-      setTimeout(() => inputRef.current?.focus(), 100);
+      setMessages(prev => [...prev, { type: "ai", text: `Got everything! Generating your full spec for "${appName}"...`, insight: "Building outputs" }]);
+      await generateOutputs(sum, appName);
+      return;
     }
+
+    setLoading(true);
+    const newHist = [...apiHistory, { role: "user", content: userText }];
+
+    const aiText = await callAPI(newHist, DISCOVERY_SYSTEM, 800);
+
+    // Check if Opus signals it's ready
+    if (aiText.includes("SPECAI_READY:")) {
+      const name = aiText.split("SPECAI_READY:")[1]?.trim() || appName;
+      setAppName(name);
+      const sum = buildSummaryFromContext(idea, newContextDB);
+      setSummary(sum);
+      setLoading(false);
+      setMessages(prev => [...prev, { type: "ai", text: `Got everything! Generating your full spec for "${name}"...`, insight: "Building outputs" }]);
+      await generateOutputs(sum, name);
+      return;
+    }
+
+    // Normal question — store and continue
+    const updatedHist = [...newHist, { role: "assistant", content: aiText }];
+    setApiHistory(updatedHist);
+    setLastQuestion(aiText);
+
+    // Auto-detect app type from conversation
+    if (!appType) setAppType(detectAppType(idea + " " + userText));
+
+    setMessages(prev => [...prev, { type: "ai", text: aiText, insight: `${questionCount + 1} questions` }]);
+    setQuestionCount(q => q + 1);
+    setLoading(false);
+    setTimeout(() => inputRef.current?.focus(), 100);
   };
 
-  const reset = () => { setIdea(""); setStarted(false); setMessages([]); setHistory([]); setInput(""); setLoading(false); setAppType(null); setOutput(null); setSummary(""); setQuestionCount(0); setGenerating(null); setRegenerating(false); };
+  const reset = () => {
+    setIdea(""); setStarted(false); setMessages([]); setApiHistory([]); setContextDB([]);
+    setInput(""); setLoading(false); setAppType(null); setAppName("Your App");
+    setOutput(null); setSummary(""); setQuestionCount(0); setGenerating(null);
+    setRegenerating(false); setLastQuestion("");
+  };
+
+  // Show context DB summary count in UI
+  const contextCoverage = () => {
+    const topics = ["features", "users", "stack", "auth", "design", "db", "deploy"];
+    const covered = contextDB.filter(({ q, a }) => topics.some(t => (q + a).toLowerCase().includes(t))).length;
+    return Math.min(Math.round((covered / topics.length) * 100), 95);
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: "#fafafa", fontFamily: "'DM Sans','Helvetica Neue',sans-serif", display: "flex", flexDirection: "column", alignItems: "center", padding: "0 16px 80px" }}>
@@ -482,86 +481,102 @@ export default function SpecAI() {
         .chip:hover{background:#f3f4f6!important}
       `}</style>
 
-      <div style={{ width:"100%", maxWidth:"700px", padding:"28px 0 0", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
-          <div style={{ width:"30px", height:"30px", background:"#111", borderRadius:"8px", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"14px" }}>⬡</div>
-          <span style={{ fontWeight:600, fontSize:"15px", color:"#111", letterSpacing:"-0.02em" }}>SpecAI</span>
+      {/* Header */}
+      <div style={{ width: "100%", maxWidth: "700px", padding: "28px 0 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ width: "30px", height: "30px", background: "#111", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px" }}>⬡</div>
+          <span style={{ fontWeight: 600, fontSize: "15px", color: "#111", letterSpacing: "-0.02em" }}>SpecAI</span>
           {appType && <Badge type={appType} />}
         </div>
         {started && (
-          <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
-            <span style={{ fontSize:"11px", color:"#9ca3af", fontFamily:"DM Mono, monospace" }}>{questionCount} questions</span>
-            <button onClick={reset} style={{ padding:"4px 10px", borderRadius:"7px", border:"1px solid #e5e7eb", background:"#fff", color:"#6b7280", fontSize:"12px", cursor:"pointer" }}>↺ Reset</button>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            {contextDB.length > 0 && !output && (
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <div style={{ width: "60px", height: "3px", background: "#f3f4f6", borderRadius: "2px", overflow: "hidden" }}>
+                  <div style={{ width: `${contextCoverage()}%`, height: "100%", background: "#111", borderRadius: "2px", transition: "width 0.5s" }} />
+                </div>
+                <span style={{ fontSize: "10px", color: "#9ca3af", fontFamily: "DM Mono, monospace" }}>{contextCoverage()}%</span>
+              </div>
+            )}
+            <span style={{ fontSize: "11px", color: "#9ca3af", fontFamily: "DM Mono, monospace" }}>{questionCount}q</span>
+            <button onClick={reset} style={{ padding: "4px 10px", borderRadius: "7px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "12px", cursor: "pointer" }}>↺ Reset</button>
           </div>
         )}
       </div>
 
-      <div style={{ width:"100%", maxWidth:"700px", marginTop:"36px" }}>
+      <div style={{ width: "100%", maxWidth: "700px", marginTop: "36px" }}>
+        {/* Landing */}
         {!started && (
-          <div style={{ animation:"fadeUp 0.4s ease" }}>
-            <h1 style={{ fontSize:"34px", fontWeight:600, color:"#111", letterSpacing:"-0.04em", lineHeight:1.15, margin:"0 0 10px" }}>Idea → Production Prompt.</h1>
-            <p style={{ fontSize:"14px", color:"#6b7280", margin:"0 0 28px", lineHeight:1.65 }}>Describe your app. SpecAI asks smart questions, generates a full spec, and lets you refine each section with feedback.</p>
-            <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:"14px", padding:"18px", boxShadow:"0 1px 3px rgba(0,0,0,0.04)" }}>
-              <textarea value={idea} onChange={e=>setIdea(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&e.metaKey) startSession(); }} placeholder="e.g. An app where restaurant owners manage menus, orders and staff shifts from one dashboard..." rows={4} style={{ width:"100%", border:"none", resize:"none", fontSize:"14px", lineHeight:"1.7", color:"#111", background:"transparent", fontFamily:"DM Sans, sans-serif" }} />
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginTop:"10px", paddingTop:"10px", borderTop:"1px solid #f3f4f6" }}>
-                <span style={{ fontSize:"11px", color:"#d1d5db", fontFamily:"DM Mono, monospace" }}>⌘+Enter to start</span>
-                <button onClick={startSession} disabled={!idea.trim()} className="sbtn" style={{ padding:"7px 18px", borderRadius:"9px", border:"none", background:"#111", color:"#fff", fontSize:"13px", fontWeight:500, cursor:"pointer", transition:"background 0.15s" }}>Start →</button>
+          <div style={{ animation: "fadeUp 0.4s ease" }}>
+            <h1 style={{ fontSize: "34px", fontWeight: 600, color: "#111", letterSpacing: "-0.04em", lineHeight: 1.15, margin: "0 0 10px" }}>Idea → Production Prompt.</h1>
+            <p style={{ fontSize: "14px", color: "#6b7280", margin: "0 0 28px", lineHeight: 1.65 }}>Describe your app. SpecAI asks smart questions, builds a context map, then generates a full spec, ready-to-use prompt, and 4-phase build chain.</p>
+            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "14px", padding: "18px", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" }}>
+              <textarea value={idea} onChange={e => setIdea(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && e.metaKey) startSession(); }} placeholder="e.g. A social app for book clubs where members discuss chapters, share notes, and vote on next reads..." rows={4} style={{ width: "100%", border: "none", resize: "none", fontSize: "14px", lineHeight: "1.7", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif" }} />
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "10px", paddingTop: "10px", borderTop: "1px solid #f3f4f6" }}>
+                <span style={{ fontSize: "11px", color: "#d1d5db", fontFamily: "DM Mono, monospace" }}>⌘+Enter to start</span>
+                <button onClick={startSession} disabled={!idea.trim()} className="sbtn" style={{ padding: "7px 18px", borderRadius: "9px", border: "none", background: "#111", color: "#fff", fontSize: "13px", fontWeight: 500, cursor: "pointer", transition: "background 0.15s" }}>Start →</button>
               </div>
             </div>
-            <div style={{ display:"flex", gap:"6px", marginTop:"12px", flexWrap:"wrap" }}>
-              {["Ecommerce with AI recommendations","SaaS analytics dashboard","Doctor-patient app","Social app for book clubs"].map(ex=>(
-                <button key={ex} className="chip" onClick={()=>setIdea(ex)} style={{ padding:"5px 12px", borderRadius:"100px", border:"1px solid #e5e7eb", background:"#fff", color:"#6b7280", fontSize:"12px", cursor:"pointer", transition:"background 0.15s" }}>{ex}</button>
+            <div style={{ display: "flex", gap: "6px", marginTop: "12px", flexWrap: "wrap" }}>
+              {["Ecommerce with AI recommendations", "SaaS analytics dashboard", "Doctor-patient app", "Social app for book clubs"].map(ex => (
+                <button key={ex} className="chip" onClick={() => setIdea(ex)} style={{ padding: "5px 12px", borderRadius: "100px", border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: "12px", cursor: "pointer", transition: "background 0.15s" }}>{ex}</button>
               ))}
             </div>
           </div>
         )}
 
+        {/* Chat */}
         {started && (
           <div>
-            <div style={{ display:"flex", flexDirection:"column", gap:"14px" }}>
-              {messages.map((msg,i)=>(
-                <div key={i} className="msg" style={{ display:"flex", justifyContent:msg.type==="user"?"flex-end":"flex-start" }}>
-                  {msg.type==="ai" && (
-                    <div style={{ maxWidth:"84%" }}>
-                      {msg.insight && <div style={{ fontSize:"10px", color:"#9ca3af", fontFamily:"DM Mono, monospace", marginBottom:"5px", paddingLeft:"2px" }}>⬡ {msg.insight}</div>}
-                      <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:"14px 14px 14px 3px", padding:"12px 16px", fontSize:"14px", lineHeight:"1.7", color:"#111", boxShadow:"0 1px 3px rgba(0,0,0,0.04)", whiteSpace:"pre-line" }}>
-                        {i===messages.length-1&&!output&&!generating ? <TypewriterText text={msg.text}/> : msg.text}
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              {messages.map((msg, i) => (
+                <div key={i} className="msg" style={{ display: "flex", justifyContent: msg.type === "user" ? "flex-end" : "flex-start" }}>
+                  {msg.type === "ai" && (
+                    <div style={{ maxWidth: "84%" }}>
+                      {msg.insight && <div style={{ fontSize: "10px", color: "#9ca3af", fontFamily: "DM Mono, monospace", marginBottom: "5px", paddingLeft: "2px" }}>⬡ {msg.insight}</div>}
+                      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "14px 14px 14px 3px", padding: "12px 16px", fontSize: "14px", lineHeight: "1.7", color: "#111", boxShadow: "0 1px 3px rgba(0,0,0,0.04)", whiteSpace: "pre-line" }}>
+                        {i === messages.length - 1 && !output && !generating ? <TypewriterText text={msg.text} /> : msg.text}
                       </div>
                     </div>
                   )}
-                  {msg.type==="user" && (
-                    <div style={{ background:"#111", borderRadius:"14px 14px 3px 14px", padding:"11px 16px", fontSize:"14px", lineHeight:"1.7", color:"#fff", maxWidth:"80%" }}>{msg.text}</div>
+                  {msg.type === "user" && (
+                    <div style={{ background: "#111", borderRadius: "14px 14px 3px 14px", padding: "11px 16px", fontSize: "14px", lineHeight: "1.7", color: "#fff", maxWidth: "80%" }}>{msg.text}</div>
                   )}
                 </div>
               ))}
 
               {generating && (
-                <div className="msg" style={{ display:"flex" }}>
-                  <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:"14px", padding:"16px 20px", boxShadow:"0 1px 3px rgba(0,0,0,0.04)", minWidth:"270px" }}>
-                    <div style={{ fontSize:"10px", color:"#9ca3af", fontFamily:"DM Mono, monospace", marginBottom:"10px" }}>⬡ Building your spec</div>
-                    {["Generating Spec Doc...","Generating Ready Prompt...","Generating Phase Chain..."].map((label,i)=>(
-                      <GeneratingStep key={label} label={label} done={generating.done.includes(label)} active={generating.step===i}/>
+                <div className="msg" style={{ display: "flex" }}>
+                  <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "14px", padding: "16px 20px", boxShadow: "0 1px 3px rgba(0,0,0,0.04)", minWidth: "270px" }}>
+                    <div style={{ fontSize: "10px", color: "#9ca3af", fontFamily: "DM Mono, monospace", marginBottom: "10px" }}>⬡ Building your spec</div>
+                    {["Generating Spec Doc...", "Generating Ready Prompt...", "Generating Phase Chain..."].map((label, i) => (
+                      <GeneratingStep key={label} label={label} done={generating.done.includes(label)} active={generating.step === i} />
                     ))}
                   </div>
                 </div>
               )}
 
-              {loading&&!generating && (
-                <div className="msg" style={{ display:"flex" }}>
-                  <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:"14px", padding:"12px 16px", display:"flex", gap:"4px", alignItems:"center" }}>
-                    {[0,1,2].map(i=><div key={i} style={{ width:"5px", height:"5px", borderRadius:"50%", background:"#d1d5db", animation:`blink 1.2s ${i*0.2}s infinite` }}/>)}
+              {loading && !generating && (
+                <div className="msg" style={{ display: "flex" }}>
+                  <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "14px", padding: "12px 16px", display: "flex", gap: "4px", alignItems: "center" }}>
+                    {[0, 1, 2].map(i => <div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#d1d5db", animation: `blink 1.2s ${i * 0.2}s infinite` }} />)}
                   </div>
                 </div>
               )}
-              <div ref={bottomRef}/>
+              <div ref={bottomRef} />
             </div>
 
-            {output && <OutputSection {...output} onFeedback={handleFeedback} regenerating={regenerating}/>}
+            {output && <OutputSection {...output} onFeedback={handleFeedback} regenerating={regenerating} />}
 
-            {!output&&!generating && (
-              <div style={{ position:"sticky", bottom:"14px", marginTop:"20px", background:"#fff", border:"1px solid #e5e7eb", borderRadius:"13px", padding:"10px 14px", display:"flex", gap:"8px", alignItems:"flex-end", boxShadow:"0 4px 20px rgba(0,0,0,0.06)" }}>
-                <textarea ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendAnswer();}}} placeholder="Your answer..." rows={1} style={{ flex:1, border:"none", resize:"none", fontSize:"14px", lineHeight:"1.6", color:"#111", background:"transparent", fontFamily:"DM Sans, sans-serif", maxHeight:"100px", overflowY:"auto" }}/>
-                <button onClick={sendAnswer} disabled={!input.trim()||loading} className="sbtn" style={{ padding:"7px 14px", borderRadius:"9px", border:"none", background:"#111", color:"#fff", fontSize:"13px", fontWeight:500, cursor:"pointer", transition:"background 0.15s", flexShrink:0 }}>→</button>
+            {!output && !generating && (
+              <div style={{ position: "sticky", bottom: "14px", marginTop: "20px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: "13px", padding: "10px 14px", boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
+                <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAnswer(); } }} placeholder={questionCount >= 3 ? `Answer or type "done" to generate...` : "Your answer..."} rows={1} style={{ width: "100%", border: "none", resize: "none", fontSize: "14px", lineHeight: "1.6", color: "#111", background: "transparent", fontFamily: "DM Sans, sans-serif", maxHeight: "100px", overflowY: "auto", outline: "none" }} />
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "6px" }}>
+                  <span style={{ fontSize: "10px", color: "#d1d5db", fontFamily: "DM Mono, monospace" }}>
+                    {questionCount >= 3 ? `type "done" to generate anytime` : "Enter to send"}
+                  </span>
+                  <button onClick={sendAnswer} disabled={!input.trim() || loading} className="sbtn" style={{ padding: "6px 14px", borderRadius: "8px", border: "none", background: "#111", color: "#fff", fontSize: "12px", fontWeight: 500, cursor: "pointer", transition: "background 0.15s" }}>→</button>
+                </div>
               </div>
             )}
           </div>
