@@ -15,10 +15,10 @@ import { useState, useRef, useEffect } from "react";
 // ════════════════════════════════════════════════════
 
 const MODELS = {
-  discovery: "claude-sonnet-4-6",
-  compress:  "claude-sonnet-4-6",
-  gemini:    "gpt-5.4",
-  claude:    "claude-sonnet-4-6",
+  discovery: "claude-haiku-4-5",  // cheap + fast for questions
+  compress:  "claude-haiku-4-5",  // cheap for JSON extraction
+  gemini:    "claude-sonnet-4-6", // quality for frontend prompt
+  claude:    "claude-sonnet-4-6", // quality for backend prompt
 };
 
 // ── Puter API call ──
@@ -87,7 +87,7 @@ const compressAnswer = (answer) => {
 
 // ── Build discovery prompt ──
 const buildDiscoveryPrompt = (idea, qaHistory, questionNumber) => {
-  const remaining = 8 - questionNumber;
+  const remaining = 5 - questionNumber;
   let context = `App idea: "${idea}"\n`;
   if (qaHistory.length > 0) {
     context += "\nKnown so far:\n";
@@ -97,7 +97,7 @@ const buildDiscoveryPrompt = (idea, qaHistory, questionNumber) => {
     });
   }
   context += `\nQuestions remaining: ${remaining}`;
-  if (remaining <= 2) context += ` (converge — critical gaps only, else SPECAI_READY)`;
+  if (remaining <= 1) context += ` (last question — then SPECAI_READY)`;
   return context;
 };
 
@@ -112,7 +112,7 @@ const buildContext = async (idea, qaHistory) => {
   const result = await ask(
     prompt,
     "Extract app requirements into compact JSON. Valid JSON only. No explanations.",
-    500, MODELS.compress
+    300, MODELS.compress
   );
 
   try {
@@ -484,26 +484,23 @@ export default function SpecAI() {
 
   const askDiscovery = async (currentIdea, currentHistory, currentCount) => {
     const userMsg = buildDiscoveryPrompt(currentIdea, currentHistory, currentCount);
-    const system = `You are SpecAI, a senior product architect. Ask exactly ONE sharp question to understand an app idea.
+    const system = `You are SpecAI. Ask ONE question to spec an app in max 5 questions.
 
-FORMAT (strict — always follow this):
-Q: [question max 10 words]
-• option/point (only if listing choices)
-• option/point
+FORMAT:
+Q: [max 8 words]
+• bullet if listing options
 
-RULES:
-- ONE question only. Never write Q: twice.
-- No preamble. No "Great!", "Thanks!".
-- Use Claude-level reasoning — ask the non-obvious question.
-- When ready (by Q8): respond ONLY "SPECAI_READY: [App Name]"`;
+RULES: One question. No preamble. No filler.
+Cover in 5 questions: users + features + stack + auth/DB + design/deploy
+By Q5 at latest: respond ONLY "SPECAI_READY: [App Name]"`;
 
-    const raw = await ask(userMsg, system, 120, MODELS.discovery);
+    const raw = await ask(userMsg, system, 80, MODELS.discovery);
     return extractFirstQuestion(raw);
   };
 
   // ── Generate both documents ──
   const runGeneration = async (ctx, parsed, name) => {
-    const twoPhases = needsTwoPhases(parsed);
+    const twoPhases = false; // always single phase to stay under 7000 tokens
     const steps = twoPhases
       ? ["gemini.md Phase 1", "gemini.md Phase 2", "claude.md Phase 1", "claude.md Phase 2"]
       : ["gemini.md", "claude.md"];
@@ -516,7 +513,7 @@ RULES:
 
     if (twoPhases) {
       // Gemini Phase 1
-      const g1 = await ask(buildGeminiPhase1(ctx), "Write a complete, spoonfeeding frontend build prompt in markdown. No preamble.", 1800, MODELS.gemini);
+      const g1 = await ask(buildGeminiPhase1(ctx), "Write a complete, spoonfeeding frontend build prompt in markdown. No preamble.", 1200, MODELS.gemini);
       done.push(steps[0]); setGenerating({ done:[...done], total:steps.length, steps, twoPhases });
 
       // Gemini Phase 2
@@ -524,7 +521,7 @@ RULES:
       done.push(steps[1]); setGenerating({ done:[...done], total:steps.length, steps, twoPhases });
 
       // Claude Phase 1
-      const c1 = await ask(buildClaudePhase1(ctx), "Write a complete, spoonfeeding backend build prompt in markdown. No preamble.", 1800, MODELS.claude);
+      const c1 = await ask(buildClaudePhase1(ctx), "Write a complete, spoonfeeding backend build prompt in markdown. No preamble.", 1200, MODELS.claude);
       done.push(steps[2]); setGenerating({ done:[...done], total:steps.length, steps, twoPhases });
 
       // Claude Phase 2
@@ -535,10 +532,10 @@ RULES:
       claudeDoc = `# claude.md — Backend Build Prompt\n\n## Phase 1\n\n${c1.trim()}\n\n---\n\n## Phase 2\n\n${c2.trim()}`;
     } else {
       // Single phase each
-      const g = await ask(buildGeminiPhase1(ctx), "Write a complete, spoonfeeding frontend build prompt in markdown. No preamble.", 1800, MODELS.gemini);
+      const g = await ask(buildGeminiPhase1(ctx), "Write a complete, spoonfeeding frontend build prompt in markdown. No preamble.", 1200, MODELS.gemini);
       done.push(steps[0]); setGenerating({ done:[...done], total:steps.length, steps, twoPhases });
 
-      const c = await ask(buildClaudePhase1(ctx), "Write a complete, spoonfeeding backend build prompt in markdown. No preamble.", 1800, MODELS.claude);
+      const c = await ask(buildClaudePhase1(ctx), "Write a complete, spoonfeeding backend build prompt in markdown. No preamble.", 1200, MODELS.claude);
       done.push(steps[1]); setGenerating({ done:[...done], total:steps.length, steps, twoPhases });
 
       geminiDoc = `# gemini.md — Frontend Build Prompt\n\n${g.trim()}`;
@@ -589,7 +586,7 @@ RULES:
     setMessages(prev=>[...prev,{type:"user",text:userText}]);
 
     const forceWords = /^(done|generate|go|proceed|finish|that'?s?\s*(all|it|enough)|ok(ay)?|yes|build)$/i;
-    if (qCount >= 8 || forceWords.test(userText.trim())) {
+    if (qCount >= 5 || forceWords.test(userText.trim())) {
       await triggerGeneration(newHistory, appName); return;
     }
 
@@ -680,11 +677,11 @@ RULES:
             {!output && (
               <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
                 <div style={{display:"flex",gap:"3px"}}>
-                  {[...Array(8)].map((_,i)=>(
+                  {[...Array(5)].map((_,i)=>(
                     <div key={i} style={{width:"6px",height:"6px",borderRadius:"50%",background:i<qCount?"#111":"#e5e7eb",transition:"background 0.3s"}}/>
                   ))}
                 </div>
-                <span style={{fontSize:"10px",color:qCount>=6?"#f59e0b":"#9ca3af",fontFamily:"DM Mono, monospace",fontWeight:qCount>=6?600:400}}>{qCount}/8</span>
+                <span style={{fontSize:"10px",color:qCount>=6?"#f59e0b":"#9ca3af",fontFamily:"DM Mono, monospace",fontWeight:qCount>=4?600:400}}>{qCount}/5</span>
               </div>
             )}
             <button onClick={reset} style={{padding:"4px 10px",borderRadius:"7px",border:"1px solid #e5e7eb",background:"#fff",color:"#6b7280",fontSize:"12px",cursor:"pointer"}}>↺ Reset</button>
@@ -780,9 +777,9 @@ RULES:
 
             {!output&&!generating&&(
               <div style={{position:"sticky",bottom:"14px",marginTop:"20px",background:"#fff",border:"1px solid #e5e7eb",borderRadius:"13px",padding:"10px 14px",boxShadow:"0 4px 20px rgba(0,0,0,0.06)"}}>
-                <textarea ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendAnswer();}}} placeholder={qCount>=7?"Last question — answer to generate...":qCount>=5?`Answer or type "done" to generate early...`:"Your answer..."} rows={1} style={{width:"100%",border:"none",resize:"none",fontSize:"14px",lineHeight:"1.6",color:"#111",background:"transparent",fontFamily:"DM Sans, sans-serif",maxHeight:"100px",overflowY:"auto",outline:"none"}}/>
+                <textarea ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendAnswer();}}} placeholder={qCount>=4?"Last question — answer to generate...":qCount>=3?`Answer or type "done" to generate early...`:"Your answer..."} rows={1} style={{width:"100%",border:"none",resize:"none",fontSize:"14px",lineHeight:"1.6",color:"#111",background:"transparent",fontFamily:"DM Sans, sans-serif",maxHeight:"100px",overflowY:"auto",outline:"none"}}/>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:"6px"}}>
-                  <span style={{fontSize:"10px",color:"#d1d5db",fontFamily:"DM Mono, monospace"}}>{qCount>=5?`"done" to generate early · auto at Q8`:"Enter to send"}</span>
+                  <span style={{fontSize:"10px",color:"#d1d5db",fontFamily:"DM Mono, monospace"}}>{qCount>=3?`"done" to generate early · auto at Q5`:"Enter to send"}</span>
                   <button onClick={sendAnswer} disabled={!input.trim()||loading} className="sbtn" style={{padding:"6px 14px",borderRadius:"8px",border:"none",background:"#111",color:"#fff",fontSize:"12px",fontWeight:500,cursor:"pointer",transition:"background 0.15s"}}>→</button>
                 </div>
               </div>
