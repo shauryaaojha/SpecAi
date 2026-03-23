@@ -7,13 +7,15 @@ const DISCOVERY_SYSTEM = `You are SpecAI, an expert product architect. Help user
 - Cover: core features, users, stack, design, auth, DB, integrations, edge cases
 - When you have enough info to build a complete spec, set phase to "complete"
 
-Respond ONLY in JSON, no markdown fences:
+You may think through your reasoning briefly, but your FINAL output must ALWAYS be valid JSON and nothing else after it.
 
-During questioning:
-{"phase":"questioning","appType":"type or null","question":"one question","insight":"one line summary"}
+During questioning, end with:
+{"phase":"questioning","appType":"detected type or null","question":"your single smart question","insight":"one line of what you understand so far"}
 
-When ready:
-{"phase":"complete","appType":"final type","appName":"suggested name","summary":"3-5 sentence summary of everything discussed"}`;
+When you have enough info (features, users, stack, auth, DB, design all covered), end with:
+{"phase":"complete","appType":"final type","appName":"a good app name","summary":"detailed 5-8 sentence summary covering app purpose, all features discussed, tech stack, target users, and any special requirements"}
+
+CRITICAL: Your response must end with a single JSON object. No text after the closing brace.`;
 
 const SPEC_SYSTEM = `You are an expert product architect. Write extremely detailed, production-ready product spec documents in markdown. Be exhaustive — every feature, every edge case, every DB field, every API endpoint. Plain markdown only. No preamble.`;
 const PROMPT_SYSTEM = `You are an expert prompt engineer who writes production-ready prompts for AI coding assistants. Your prompts are extremely detailed and spoonfeeding — zero ambiguity. Plain text only. No preamble.`;
@@ -32,7 +34,7 @@ const extractText = (response) => {
   } catch { return ""; }
 };
 
-const callAPI = async (messages, system, maxTokens = 2000) => {
+const callAPI = async (messages, system, maxTokens = 4000) => {
   try {
     const response = await window.puter.ai.chat(
       [{ role: "system", content: system }, ...messages],
@@ -350,15 +352,15 @@ export default function SpecAI() {
     const done = [];
     setGenerating({ step: 0, done });
 
-    const specDoc = await callAPI([{ role: "user", content: buildSpecPrompt(sum) }], SPEC_SYSTEM, 2500);
+    const specDoc = await callAPI([{ role: "user", content: buildSpecPrompt(sum) }], SPEC_SYSTEM, 4000);
     done.push(steps[0]);
     setGenerating({ step: 1, done: [...done] });
 
-    const readyPrompt = await callAPI([{ role: "user", content: buildPromptPrompt(sum) }], PROMPT_SYSTEM, 2500);
+    const readyPrompt = await callAPI([{ role: "user", content: buildPromptPrompt(sum) }], PROMPT_SYSTEM, 4000);
     done.push(steps[1]);
     setGenerating({ step: 2, done: [...done] });
 
-    const chainRaw = await callAPI([{ role: "user", content: buildChainPrompt(sum) }], CHAIN_SYSTEM, 2500);
+    const chainRaw = await callAPI([{ role: "user", content: buildChainPrompt(sum) }], CHAIN_SYSTEM, 4000);
     done.push(steps[2]);
     setGenerating({ step: 3, done: [...done] });
 
@@ -382,13 +384,13 @@ export default function SpecAI() {
     let updated = { ...output };
 
     if (targetTab === "spec") {
-      const specDoc = await callAPI([{ role: "user", content: buildSpecPrompt(summary, feedbackText) }], SPEC_SYSTEM, 2500);
+      const specDoc = await callAPI([{ role: "user", content: buildSpecPrompt(summary, feedbackText) }], SPEC_SYSTEM, 4000);
       updated.specDoc = specDoc.trim();
     } else if (targetTab === "prompt") {
-      const readyPrompt = await callAPI([{ role: "user", content: buildPromptPrompt(summary, feedbackText) }], PROMPT_SYSTEM, 2500);
+      const readyPrompt = await callAPI([{ role: "user", content: buildPromptPrompt(summary, feedbackText) }], PROMPT_SYSTEM, 4000);
       updated.readyPrompt = readyPrompt.trim();
     } else if (targetTab === "chain") {
-      const chainRaw = await callAPI([{ role: "user", content: buildChainPrompt(summary, feedbackText) }], CHAIN_SYSTEM, 2500);
+      const chainRaw = await callAPI([{ role: "user", content: buildChainPrompt(summary, feedbackText) }], CHAIN_SYSTEM, 4000);
       updated.phaseChain = parsePhaseChain(chainRaw);
     }
 
@@ -402,7 +404,7 @@ export default function SpecAI() {
   };
 
   const callDiscovery = async (hist) => {
-    const text = await callAPI(hist, DISCOVERY_SYSTEM, 400);
+    const text = await callAPI(hist, DISCOVERY_SYSTEM, 800);
     const parsed = parseJSON(text);
     if (parsed) return parsed;
     // If JSON parse fails but we got real text back, use it as the question
